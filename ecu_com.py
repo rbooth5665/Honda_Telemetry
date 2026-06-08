@@ -1,6 +1,10 @@
 import serial
 import serial.tools.list_ports
 import time
+#--------- Globals ---------#
+READ_BYTE = [0x72] #established message typing, 0x72 being read requests
+
+
 
 #--------- Methods ---------#
 def find_serial_port(): #connects to the FTDI serial port, active loop to probe for ports
@@ -47,23 +51,30 @@ def send_recv(ser, frame, recv_len, timout=0.5): #sends byte frame from serial p
     return buf
 
 def validate_frame(frame): #checks for 4 byte frame, validates checksum
-    if len(frame) != 4:
+    if len(frame) < 3:
         return False
     return frame[-1] == honda_checksum(frame[:-1])
 
+def wakeup(): #sends wakeup pulse and wakeup fram to ECU, returns response received
+    #Creates wakeup frame, pulses K-Line
+    wakeup_frame = build_frame([0xFE],[0x72])
+    ser.send_break(.070)
+    time.sleep(.130)
+    
+    return send_recv(ser, wakeup_frame, 4)
+
 
 #--------- Program ---------#
-#creates wakeup frame
-wakeup_frame = build_frame([0xFE],[0x72])
-
 try:
     #opens serial port, flushes buffer
-    ser = serial.Serial(find_serial_port(),
+    ser = serial.Serial(
+                        find_serial_port(),
                         10400,
                         serial.EIGHTBITS, 
                         serial.PARITY_NONE, 
                         serial.STOPBITS_ONE, 
-                        timeout=1)
+                        timeout=1
+                        )
     ser.reset_input_buffer()
 
 except serial.SerialException as e:
@@ -75,21 +86,31 @@ finally:
         print("Serial port did not open")
         SystemExit(1)
 
-#ECU wakeup pulse, clears input buffer noise
-ser.send_break(.070)
-time.sleep(.130)
-ser.reset_input_buffer()
+#diagnostic frame candidates to test
+diag_frame_candidate = {
+                        build_frame(READ_BYTE,[0x00, 0xf0]), # PC37 diagnostic frame
+                        build_frame(READ_BYTE,[0x00, 0x10]), #KWP2000 diagnostic protocol
+                        
+                        
+                        
+                        
+                        
+                        }                
 
-#send wakeup frame, receive ECU response
-recv = send_recv(ser, wakeup_frame, 4)
+
+#ECU wakeup protocol
+recv = wakeup()
 
 #prints transmission results, checks checksum
-print(f"TX: {hex(wakeup_frame)}")
 if recv:
     print(f"RX: {recv}")
     if validate_frame(recv):
         print("Valid ECU response received")
     else:
         print("Checksum validation failed")
+        ser.close()
+        SystemExit(1)
 else:
     print("No response received from ECU")
+    ser.close()
+    SystemExit(1)
