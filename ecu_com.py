@@ -14,12 +14,12 @@ def find_serial_port(): #connects to the FTDI serial port, active loop to probe 
         time.sleep(.1)
         ports = serial.tools.list_ports.comports()
         
-    for ports in serial.tools.list_ports.comports():
-        desc = ports.description.lower()
-        manf = ports.manufacturer.lower()
+    for potential_port in serial.tools.list_ports.comports():
+        desc = (potential_port.description or "").lower()
+        manf = (potential_port.manufacturer or "").lower()
         if "ftdi" in desc or "ftdi" in manf:
-            return ports.device
-    return "No FTDI serial port found"
+            return potential_port.device
+    return None
 
 def honda_checksum(data): #returns the honda checksum for a list of bytes as a hex value
     return ((sum(bytearray(data)) ^ 0xFF) + 1) & 0xFF
@@ -59,8 +59,8 @@ def send_recv(ser, frame, recv_len=None, timout=0.5): #sends byte frame from ser
                 buf.extend(chunk)
                 last_rx = time.time()
             #transmission hasn't occured recently, safe to assume the ECU is done communicating
-            elif last_rx > time.time() +.05:
-                break;
+            elif time.time() - last_rx > .05:
+                break
 
     #returns a hex array of the ECU response
     return buf
@@ -133,23 +133,30 @@ diag_frame_candidate = [
                         ]    
 
 #if ECU response has been validated, transmit diagnostic candidates
+diag_failed = {}
+diag_valid = {}
 for diag_frame in diag_frame_candidate:
     #test each frame, receive any message from ECU
     diag_recv = send_recv(ser, diag_frame)
-
+    
     #if a frame receives response
     if diag_recv:
-        print(f"Diag TX: {diag_frame}")
-        print(f"Diag RX: {diag_recv}")
+        print(f"Diag TX: {[hex(b) for b in diag_frame]}")
+        print(f"Diag RX: {[hex(b) for b in diag_recv]}")
 
         if validate_frame(diag_recv):
+            #if validation is succesful, pass the valid frame to the valid received message as frame: response
             print("Diagnostic Message Received and validated")
+            diag_valid.update({diag_frame: diag_recv})
 
         else:
+            #something was received but it fails validation, pass to list that stores failed messages as frame: response
             print("Diagnostic Message Received but failed validation")
-            raise SystemExit(1)
+            diag_failed.update({diag_frame: diag_recv})
     
     #all candidate messages have been attempted and nothing has been received
     if diag_frame == diag_frame_candidate[-1] and not diag_recv:
         print("All Messages attempted, no message received")
-        raise SystemExit(1)
+    
+
+ser.close()
