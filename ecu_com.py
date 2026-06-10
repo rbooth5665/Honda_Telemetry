@@ -3,7 +3,7 @@ import serial.tools.list_ports
 import time
 #--------- Globals ---------#
 READ_BYTE = [0x72] #established message typing, 0x72 being read requests
-
+WAKEUP_RESPONSE = bytearray(b"\x0E\x04r|") #expected response from ECU
 
 
 #--------- Methods ---------#
@@ -31,7 +31,7 @@ def build_frame(mtype, data): #builds the message frame as a list of bytes
     cksum = honda_checksum(frame)
     return frame + [cksum]
 
-def send_recv(ser, frame, recv_len, timout=0.5): #sends byte frame from serial port, receives response and validates
+def send_recv(ser, frame, recv_len=None, timout=0.5): #sends byte frame from serial port, receives response and validates. Conducts greedy algorithm if no bits received
     #flush, send, read echo
     ser.reset_input_buffer()
     ser.write(bytes(frame))
@@ -41,12 +41,27 @@ def send_recv(ser, frame, recv_len, timout=0.5): #sends byte frame from serial p
     buf = bytearray()
     end = time.time() + timout
     
-    #while timeout has not been met and the received bits is less than expected, read and append
-    while len(buf) < recv_len and time.time() < end:
-        chunk = ser.read(recv_len - len(buf))
-        if chunk:
-            buf.extend(chunk)
+    #message length is known
+    if recv_len is not None:
+        while len(buf) < recv_len and time.time() < end:
+            chunk = ser.read(recv_len - len(buf))
+            if chunk:
+                buf.extend(chunk)
     
+    #message length is not known, has timeout for raw probing
+    else:
+        last_rx = time.time()
+        while time.time() < end:
+            chunk = ser.read(64)
+
+            #if the ECU is actively transmitting, append to the buffer and reset the time
+            if chunk:
+                buf.extend(chunk)
+                last_rx = time.time()
+            #transmission hasn't occured recently, safe to assume the ECU is done communicating
+            elif last_rx > time.time() +.05:
+                break;
+
     #returns a hex array of the ECU response
     return buf
 
@@ -79,37 +94,62 @@ try:
 
 except serial.SerialException as e:
     print(f"FAILED to open serial port: {e}")
-    SystemExit(1)
+    raise SystemExit(1)
 
 finally:
     if not ser.is_open:
         print("Serial port did not open")
-        SystemExit(1)
-
-#diagnostic frame candidates to test
-diag_frame_candidate = {
-                        build_frame(READ_BYTE, [0x00, 0xf0]), # PC37 diagnostic frame
-                        build_frame(READ_BYTE, [0x00, 0x10]), # KWP2000 diagnostic protocol
-                        build_frame(READ_BYTE, [0x72, 0x11, 0x00, 0x14]), # skips diagnostic protocol and requests data directly
-                        build_frame(READ_BYTE, [0x00, 0x72]), # 0x72 echo
-                        build_frame(READ_BYTE, [0x00, 0x0E]), # addresses ECU node address 0x0E
-                        build_frame(READ_BYTE, [0x00, 0x81])  # KWP2000 standard startCommunication message
-                        }                
-
+        raise SystemExit(1)
 
 #ECU wakeup protocol
 recv = wakeup()
 
 #prints transmission results, checks checksum
-if recv:
+if recv == WAKEUP_RESPONSE:
     print(f"RX: {recv}")
     if validate_frame(recv):
         print("Valid ECU response received")
     else:
         print("Checksum validation failed")
         ser.close()
-        SystemExit(1)
-else:
+        raise SystemExit(1)
+elif not recv:
     print("No response received from ECU")
     ser.close()
-    SystemExit(1)
+    raise SystemExit(1)
+
+else:
+    print(f"Received unexpected message from ECU: {recv}")
+    raise SystemExit(1)
+
+#diagnostic frame candidates to test
+diag_frame_candidate = [
+                        build_frame(READ_BYTE, [0x00, 0xf0]), # PC37 diagnostic frame
+                        build_frame(READ_BYTE, [0x00, 0x10]), # KWP2000 diagnostic protocol
+                        build_frame(READ_BYTE, [0x72, 0x11, 0x00, 0x14, 0xF0]), # skips diagnostic protocol and requests data directly
+                        build_frame(READ_BYTE, [0x00, 0x72]), # 0x72 echo
+                        build_frame(READ_BYTE, [0x00, 0x0E]), # addresses ECU node address 0x0E
+                        build_frame(READ_BYTE, [0x00, 0x81])  # KWP2000 standard startCommunication message
+                        ]    
+
+#if ECU response has been validated, transmit diagnostic candidates
+for diag_frame in diag_frame_candidate:
+    #test each frame, receive any message from ECU
+    diag_recv = send_recv(ser, diag_frame)
+
+    #if a frame receives response
+    if diag_recv:
+        print(f"Diag TX: {diag_frame}")
+        print(f"Diag RX: {diag_recv}")
+
+        if validate_frame(diag_recv):
+            print("Diagnostic Message Received and validated")
+
+        else:
+            print("Diagnostic Message Received but failed validation")
+            raise SystemExit(1)
+    
+    #all candidate messages have been attempted and nothing has been received
+    if diag_frame == diag_frame_candidate[-1] and not diag_recv:
+        print("All Messages attempted, no message received")
+        raise SystemExit(1)
