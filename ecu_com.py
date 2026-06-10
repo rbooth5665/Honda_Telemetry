@@ -88,13 +88,12 @@ finally:
 
 #diagnostic frame candidates to test
 diag_frame_candidate = {
-                        build_frame(READ_BYTE,[0x00, 0xf0]), # PC37 diagnostic frame
-                        build_frame(READ_BYTE,[0x00, 0x10]), #KWP2000 diagnostic protocol
-                        
-                        
-                        
-                        
-                        
+                        build_frame(READ_BYTE, [0x00, 0xf0]), # PC37 diagnostic frame
+                        build_frame(READ_BYTE, [0x00, 0x10]), # KWP2000 diagnostic protocol
+                        build_frame(READ_BYTE, [0x72, 0x11, 0x00, 0x14]), # skips diagnostic protocol and requests data directly
+                        build_frame(READ_BYTE, [0x00, 0x72]), # 0x72 echo
+                        build_frame(READ_BYTE, [0x00, 0x0E]), # addresses ECU node address 0x0E
+                        build_frame(READ_BYTE, [0x00, 0x81])  # KWP2000 standard startCommunication message
                         }                
 
 
