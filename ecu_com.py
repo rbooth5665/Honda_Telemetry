@@ -3,7 +3,8 @@ import serial.tools.list_ports
 import time
 #--------- Globals ---------#
 READ_BYTE = [0x72] #established message typing, 0x72 being read requests
-WAKEUP_RESPONSE = bytearray(b"\x0E\x04r|") #expected response from ECU
+WAKEUP_RESPONSE = bytearray(b'\x0E\x04r|') #expected response from ECU after wakeup message
+DIAGNOSTIC_RESPONSE = bytearray(b'\x02\x04\x00\xfa') #expected response from ECU after diagnostic request
 
 
 #--------- Methods ---------#
@@ -14,11 +15,11 @@ def find_serial_port(): #connects to the FTDI serial port, active loop to probe 
         time.sleep(.1)
         ports = serial.tools.list_ports.comports()
         
-    for potential_port in serial.tools.list_ports.comports():
-        desc = (potential_port.description or "").lower()
-        manf = (potential_port.manufacturer or "").lower()
+    for ports in serial.tools.list_ports.comports():
+        desc = (ports.description or "").lower()
+        manf = (ports.manufacturer or "").lower()
         if "ftdi" in desc or "ftdi" in manf:
-            return potential_port.device
+            return ports.device
     return None
 
 def honda_checksum(data): #returns the honda checksum for a list of bytes as a hex value
@@ -96,19 +97,19 @@ except serial.SerialException as e:
     print(f"FAILED to open serial port: {e}")
     raise SystemExit(1)
 
-finally:
-    if not ser.is_open:
-        print("Serial port did not open")
-        raise SystemExit(1)
+if ser is None or not ser.is_open:
+    print("Serial port did not open")
+    raise SystemExit(1)
 
 #ECU wakeup protocol
 recv = wakeup()
 
 #prints transmission results, checks checksum
+print("ECU WAKEUP CHECK")
 if recv == WAKEUP_RESPONSE:
     print(f"RX: {recv}")
     if validate_frame(recv):
-        print("Valid ECU response received")
+        print("Valid ECU response received\n")
     else:
         print("Checksum validation failed")
         ser.close()
@@ -147,16 +148,28 @@ for diag_frame in diag_frame_candidate:
         if validate_frame(diag_recv):
             #if validation is succesful, pass the valid frame to the valid received message as frame: response
             print("Diagnostic Message Received and validated")
-            diag_valid.update({diag_frame: diag_recv})
+            diag_valid[tuple(diag_frame)] = bytes(diag_recv)
 
         else:
             #something was received but it fails validation, pass to list that stores failed messages as frame: response
             print("Diagnostic Message Received but failed validation")
-            diag_failed.update({diag_frame: diag_recv})
+            diag_failed[tuple(diag_frame)] = bytes(diag_recv)
     
     #all candidate messages have been attempted and nothing has been received
-    if diag_frame == diag_frame_candidate[-1] and not diag_recv:
+    if diag_frame == diag_frame_candidate[-1] and not diag_failed and not diag_valid:
         print("All Messages attempted, no message received")
-    
+
+    recv_wakeup = wakeup()
+
+#prints the validated and failed dictionaries
+
+print("\nVALIDATED FRAMES")
+for k, v in diag_valid.items():
+    print(f"TX: {[hex(b) for b in k]}\nRX: {v}")
+
+if diag_failed:
+    print("\nGARBAGE RECEIVED FRAMES")
+    for k, v in diag_failed.items():
+        print(f"TX: {k}\nRX: {v}")
 
 ser.close()
