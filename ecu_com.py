@@ -79,7 +79,9 @@ def wakeup(): #sends wakeup pulse and wakeup fram to ECU, returns response recei
     
     return send_recv(ser, wakeup_frame, 4)
 
-
+def establish_diagnostic_session(): #sends diagnostic session initiation, returns response received
+    diag_frame = build_frame(READ_BYTE, [0x00, 0xf0]) 
+    return send_recv(ser, diag_frame, 4)
 #--------- Program ---------#
 try:
     #opens serial port, flushes buffer
@@ -92,7 +94,6 @@ try:
                         timeout=1
                         )
     ser.reset_input_buffer()
-
 except serial.SerialException as e:
     print(f"FAILED to open serial port: {e}")
     raise SystemExit(1)
@@ -105,7 +106,7 @@ if ser is None or not ser.is_open:
 recv = wakeup()
 
 #prints transmission results, checks checksum
-print("ECU WAKEUP CHECK")
+print("ECU WAKEUP VALIDATION")
 if recv == WAKEUP_RESPONSE:
     print(f"RX: {recv}")
     if validate_frame(recv):
@@ -118,58 +119,45 @@ elif not recv:
     print("No response received from ECU")
     ser.close()
     raise SystemExit(1)
-
 else:
     print(f"Received unexpected message from ECU: {recv}")
     raise SystemExit(1)
 
-#diagnostic frame candidates to test
-diag_frame_candidate = [
-                        build_frame(READ_BYTE, [0x00, 0xf0]), # PC37 diagnostic frame
-                        build_frame(READ_BYTE, [0x00, 0x10]), # KWP2000 diagnostic protocol
-                        build_frame(READ_BYTE, [0x72, 0x11, 0x00, 0x14, 0xF0]), # skips diagnostic protocol and requests data directly
-                        build_frame(READ_BYTE, [0x00, 0x72]), # 0x72 echo
-                        build_frame(READ_BYTE, [0x00, 0x0E]), # addresses ECU node address 0x0E
-                        build_frame(READ_BYTE, [0x00, 0x81])  # KWP2000 standard startCommunication message
-                        ]    
+diag_recv = establish_diagnostic_session()
 
-#if ECU response has been validated, transmit diagnostic candidates
-diag_failed = {}
-diag_valid = {}
-for diag_frame in diag_frame_candidate:
-    #test each frame, receive any message from ECU
-    diag_recv = send_recv(ser, diag_frame)
-    
-    #if a frame receives response
-    if diag_recv:
-        print(f"Diag TX: {[hex(b) for b in diag_frame]}")
-        print(f"Diag RX: {[hex(b) for b in diag_recv]}")
+#verifies the diagnostic response received
+if diag_recv is not DIAGNOSTIC_RESPONSE:
+    print(f"Diagnostic response not what was expected: {[hex(b) for b in diag_recv]}")
+    ser.close()
+    SystemExit(1)
 
-        if validate_frame(diag_recv):
-            #if validation is succesful, pass the valid frame to the valid received message as frame: response
-            print("Diagnostic Message Received and validated")
-            diag_valid[tuple(diag_frame)] = bytes(diag_recv)
+#once diagnostic response is validated, begin polling for information
 
+data_polling_candidates = [
+                            build_frame(READ_BYTE, [0x72,0x11,0x00,0x14,0xF0]), #1000rr polling request
+                            build_frame(READ_BYTE, [0x72,0x10,0x00,0x14,0xF0]), #polls data table 10, as per the AiM logging tech sheet
+                            build_frame(READ_BYTE, [0x72,0x00,0x00,0x14,0xF0]), #polls any table at 0x00, fallback if 10, 11 return nothing
+                            build_frame(READ_BYTE, [0x72,0x11,0x00,0x20,0xF0]), #counts 32 bytes back
+                            build_frame(READ_BYTE, [0x72,0x11,0x00,0x10,0xF0])  #counts 16 bytes back
+                          ]
+
+
+#passes the data polling cadidates, listens for response
+for data_frames in data_polling_candidates:
+    data_polled = send_recv(data_frames)
+
+    print(f"Data Polling TX: {[hex(b) for b in data_frames]}")
+    if data_polled:
+        if validate_frame(data_polled):
+            print(f"Validation passed Data Polling RX: {[hex(b) for b in data_polled]}\n")
         else:
-            #something was received but it fails validation, pass to list that stores failed messages as frame: response
-            print("Diagnostic Message Received but failed validation")
-            diag_failed[tuple(diag_frame)] = bytes(diag_recv)
-    
-    #all candidate messages have been attempted and nothing has been received
-    if diag_frame == diag_frame_candidate[-1] and not diag_failed and not diag_valid:
-        print("All Messages attempted, no message received")
+            print(f"Validation failed Data Polling RX: {[hex(b) for b in data_polled]}\n")
+    else:
+        print("ECU returned nothing from polling request")
 
-    recv_wakeup = wakeup()
+    #wakeup and reinitialize so connection doesn't drop
+    wakeup()
+    establish_diagnostic_session()
 
-#prints the validated and failed dictionaries
-
-print("\nVALIDATED FRAMES")
-for k, v in diag_valid.items():
-    print(f"TX: {[hex(b) for b in k]}\nRX: {v}")
-
-if diag_failed:
-    print("\nGARBAGE RECEIVED FRAMES")
-    for k, v in diag_failed.items():
-        print(f"TX: {k}\nRX: {v}")
 
 ser.close()
