@@ -5,7 +5,7 @@ import time
 READ_BYTE = [0x72] #established message typing, 0x72 being read requests
 WAKEUP_RESPONSE = bytearray(b'\x0E\x04r|') #expected response from ECU after wakeup message
 DIAGNOSTIC_RESPONSE = bytearray(b'\x02\x04\x00\xfa') #expected response from ECU after diagnostic request
-
+DATA_POLLING_REQUEST = [0x72, 0x07, 0x72, 0x11, 0x00, 0x14, 0xF0] #frame to request 26 bytes of data from ECU
 
 #--------- Methods ---------#
 def find_serial_port(): #connects to the FTDI serial port, active loop to probe for ports
@@ -21,6 +21,16 @@ def find_serial_port(): #connects to the FTDI serial port, active loop to probe 
         if "ftdi" in desc or "ftdi" in manf:
             return ports.device
     return None
+
+def connect_ecu(delay = 0.2): #constantly polls the bike, waits to connect to ECU
+    attempts = 0
+    print("Turn Bike On")
+    while(True): #while loop to constantly poll for ECU connection
+        recv = wakeup()
+        if recv == WAKEUP_RESPONSE and validate_frame(recv):
+            print("ECU connected and validated")
+            return recv
+        time.sleep(delay)
 
 def honda_checksum(data): #returns the honda checksum for a list of bytes as a hex value
     return ((sum(bytearray(data)) ^ 0xFF) + 1) & 0xFF
@@ -103,10 +113,10 @@ if ser is None or not ser.is_open:
     raise SystemExit(1)
 
 #ECU wakeup protocol
-recv = wakeup()
+recv = connect_ecu()
 
 #prints transmission results, checks checksum
-print("ECU WAKEUP VALIDATION")
+print("\nECU WAKEUP VALIDATION")
 if recv == WAKEUP_RESPONSE:
     print(f"RX: {recv}")
     if validate_frame(recv):
@@ -126,38 +136,46 @@ else:
 diag_recv = establish_diagnostic_session()
 
 #verifies the diagnostic response received
-if diag_recv is not DIAGNOSTIC_RESPONSE:
+print("DIAGNOSTIC SESSION VALIDATION")
+if diag_recv != DIAGNOSTIC_RESPONSE:
     print(f"Diagnostic response not what was expected: {[hex(b) for b in diag_recv]}")
     ser.close()
     SystemExit(1)
 
-#once diagnostic response is validated, begin polling for information
-
-data_polling_candidates = [
-                            build_frame(READ_BYTE, [0x72,0x11,0x00,0x14,0xF0]), #1000rr polling request
-                            build_frame(READ_BYTE, [0x72,0x10,0x00,0x14,0xF0]), #polls data table 10, as per the AiM logging tech sheet
-                            build_frame(READ_BYTE, [0x72,0x00,0x00,0x14,0xF0]), #polls any table at 0x00, fallback if 10, 11 return nothing
-                            build_frame(READ_BYTE, [0x72,0x11,0x00,0x20,0xF0]), #counts 32 bytes back
-                            build_frame(READ_BYTE, [0x72,0x11,0x00,0x10,0xF0])  #counts 16 bytes back
-                          ]
+else:
+    print(f"Diagnostic session open with: {[hex(b) for b in diag_recv]}\n")
 
 
-#passes the data polling cadidates, listens for response
-for data_frames in data_polling_candidates:
-    data_polled = send_recv(data_frames)
+try:
+    print("Control+C to quit\n")
+    poll = True
+    while(poll):
+        #poll for data, then wait .5 seconds
+        data_received = send_recv(ser, DATA_POLLING_REQUEST, 26)
+        print(f"{[hex(b) for b in data_received[5:-1]]}\n")
+        time.sleep(.05)
 
-    print(f"Data Polling TX: {[hex(b) for b in data_frames]}")
-    if data_polled:
-        if validate_frame(data_polled):
-            print(f"Validation passed Data Polling RX: {[hex(b) for b in data_polled]}\n")
-        else:
-            print(f"Validation failed Data Polling RX: {[hex(b) for b in data_polled]}\n")
-    else:
-        print("ECU returned nothing from polling request")
+        if not data_received:
+            poll = False
+except KeyboardInterrupt:
+    print("User exited")
 
-    #wakeup and reinitialize so connection doesn't drop
-    wakeup()
-    establish_diagnostic_session()
+finally:
+    ser.close()
 
-
-ser.close()
+    #received data from 20 bytes, stripped from 26 bytes
+    # [0][1]   = RPM?
+    # [2]      = TPS   
+    # [3]      = TPS Secondary?
+    # [4][5]   = ECT?
+    # [6][7]   = IAT?
+    # [8][9]   = unknown
+    # [10][11] = constant padding
+    # [12]     = unknown
+    # [13]     = unknown
+    # [14]     = gear?
+    # [15]     = unknown (moves with RPM event)
+    # [16]     = unknown, slow drift during 5 minutes
+    # [17]     = temp? warmup drift
+    # [18]     = unknown
+    # [19]     = last byte varies
