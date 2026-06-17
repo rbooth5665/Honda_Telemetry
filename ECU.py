@@ -2,6 +2,9 @@ import serial
 import serial.tools.list_ports
 import time
 import struct
+import csv
+from datetime import datetime
+import os
 
 class ECU:
     BAUD = 10400
@@ -20,9 +23,6 @@ class ECU:
         self.tps_closed = 25
         self.tps_open = 231
         
-
-
-
     @staticmethod
     def honda_checksum(data): #returns the honda checksum for a list of bytes as a hex value
         return ((sum(bytearray(data)) ^ 0xFF) + 1) & 0xFF
@@ -150,17 +150,70 @@ class ECU:
         
         self.connected = False
 
+    def start_log(self, filename=None, log_dir="logs", payload_only=True):
+        os.makedirs(log_dir, exist_ok=True)
+        
+        
+        if filename == None:
+            stamp = datetime.now().strftime("%Y$m$d_%H%M%S")
+            filename = f'ecu_log_{stamp}.csv'
+
+        path = os.path.join(log_dir, filename)
+
+        self._log_file = open(path, 'w', newline='')
+        self._log_writer = csv.writer(self._log_file)
+        self._log_payload_only = payload_only
+        self._log_header_written = False
+        self._log_sample = 0
+        self._log_start = None
+        self._log_name = path
+        print(f"logging to file {path}")
+        return path
+
+    def log_frame(self, frame):
+        if not hasattr(self, "_log_writer") or self._log_writer is None:
+            raise RuntimeError("Must call start_log() first")
+
+        if len(frame) < 26:
+            return None
+        
+        data = list(frame[5:-1]) if self._log_payload_only else list(frame)
+
+        if not self._log_header_written:
+            self._log_start = time.time()
+            cols = (["sample", "elapsed_s", "wall_clock"]
+                    + [f"b{i}" for i in range(len(data))])
+            
+            self._log_writer.writerow(cols)
+            self._log_header_written = True
+
+        elapsed = round(time.time() - self._log_start, 3)
+        wall = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        self._log_writer.writerow([self._log_sample, elapsed, wall] + data)
+        self._log_sample += 1
+        return data
+    
+    def stop_log(self):
+        if getattr(self, "_log_file", None):
+            self._log_file.close()
+            print(f"logged {self._log_sample} samples to {self._log_name}")
+            self._log_file = None
+            self._log_writer = None
+
+
+
+
 if __name__ == "__main__":
     ecu = ECU()
     if ecu.connect():
+        ecu.start_log()
         try:
             while True:
                 frame = ecu.poll()
-                data = ecu.parse(frame)
-                if data:
-                    print(f"RPM: {data['rpm']:5d}\nTPS: {data['tps_pct']:5.1f}")
+                ecu.log_frame(frame)
+                time.sleep(0.05)
         except KeyboardInterrupt:
             print("\nShutting Down")
-
         finally:
+            ecu.stop_log()
             ecu.close()

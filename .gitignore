@@ -1,0 +1,10 @@
+# Logged telemetry data — generated, not source
+logs/
+*.csv
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environment
+venv/
