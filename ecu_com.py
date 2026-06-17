@@ -1,6 +1,8 @@
 import serial
 import serial.tools.list_ports
 import time
+import csv
+
 #--------- Globals ---------#
 READ_BYTE = [0x72] #established message typing, 0x72 being read requests
 WAKEUP_RESPONSE = bytearray(b'\x0E\x04r|') #expected response from ECU after wakeup message
