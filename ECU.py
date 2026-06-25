@@ -13,6 +13,7 @@ class ECU:
     WAKEUP_FRAME = [0xFE, 0x04, 0x72, 0x8C] #transmitted wakeup frame
     DIAGNOSTIC_RESPONSE = bytearray(b'\x02\x04\x00\xfa') #expected response from ECU after diagnostic request
     DATA_REQUEST = [0x72, 0x07, 0x72, 0x11, 0x00, 0x14, 0xF0] #frame to request 26 bytes of data from ECU
+    CHASSIS_DATA_REQUEST = [0x72, 0x07, 0x72, 0xD1, 0x00, 0x14, 0x30] #frame to request 26 bytes of data from ECU
     
     #A byte map of discerned and best guess values calculated from sensors
     BYTE_MAP = ['RPM_1', 'RPM_2', 'TPS_pct', 
@@ -163,7 +164,7 @@ class ECU:
         
         
         if filename == None:
-            stamp = datetime.now().strftime("%Y$m$d_%H%M%S")
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f'ecu_log_{stamp}.csv'
 
         path = os.path.join(log_dir, filename)
@@ -211,15 +212,22 @@ class ECU:
 if __name__ == "__main__":
     ecu = ECU()
     if ecu.connect():
-        ecu.start_log()
-        try:
-            while True:
-                frame = ecu.poll()
-                ecu.log_frame(frame)
-                print(f"{[hex(b) for b in frame]}")
-                time.sleep(0.05)
-        except KeyboardInterrupt:
-            print("\nShutting Down")
-        finally:
-            ecu.stop_log()
-            ecu.close()
+        recv = ecu.send_recv(ecu.CHASSIS_DATA_REQUEST)
+        
+        if recv:
+            print(f"Chassis data received: {recv}")
+
+        else:
+            print("Nothing received from {ecu.CHASSIS_DATA_REQUEST}")
+        # ecu.start_log()
+        # try:
+        #     while True:
+        #         frame = ecu.poll()
+        #         ecu.log_frame(frame)
+        #         print(f"{[hex(b) for b in frame]}")
+        #         time.sleep(0.05)
+        # except KeyboardInterrupt:
+        #     print("\nShutting Down")
+        # finally:
+        #     ecu.stop_log()
+        #     ecu.close()

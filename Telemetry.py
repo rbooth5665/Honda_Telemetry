@@ -56,4 +56,33 @@ class Telemetry:
         d["battery_v"] = (self.BATT_M * b("batt") + self.BATT_B).round(2)
 
     @classmethod
+    def parse_frame(cls, frame):
+        if len(frame) >= 26:
+            d = list(frame[5:-1])
+
+        elif len(frame) >= 20:
+            d = list(frame[:20])
+
+        else:
+            return None
+        
+        rpm = d[cls.IDX["rpm_hi"]] * 256 + d[cls.IDX["rpm_lo"]]
+        tps = max(0.0, min(100.0, (d[cls.IDX["tps"]] - cls.TPS_CLOSED) / (cls.TPS_OPENED - cls.TPS_CLOSED) * 100))
+        ect_f = cls.ECT_M * d[cls.IDX["ect"]] + cls.ECT_B
+        batt = cls.BATT_M * d[cls.IDX["batt"]] +cls.BATT_B
+
+        return {
+            "rpm" : rpm,
+            "tps_pct" : round(tps, 1),
+            "ect_f" : round(ect_f, 1),
+            "battery_v" : round(batt, 2),
+            "map_raw" : d[cls.IDX["map"]],
+            "iat_raw" : d[cls.IDX["iat"]],
+        }
     
+    def summary(self):
+        cols = ["rpm", "tps_pct", "ect_f", "battery_v"]
+        print(self.df[cols].describe().round(1).to_string())
+
+   # def correlate(self, reference="rpm", top=10):
+        
