@@ -56,9 +56,10 @@ class ECU:
     
     def open_port(self):
         port = self.port or self._find_port()
-        if port is None:
+        attempt = 0
+        while port is None:
             attempt += 1
-            if attempt == 1 or attempt % 10 == 0:
+            if attempt % 10 == 0:
                 print(f"waiting for serial port on attempt {attempt}")
             time.sleep(2)
             port = self._find_port()
@@ -75,7 +76,7 @@ class ECU:
             self.ser.reset_input_buffer()
             return True
         except serial.SerialException as e:
-            print("Failed to open port: {e}")
+            print(f"Failed to open port: {e}")
             return False
         
     def send_recv(self, frame, recv_len=None, timeout=0.5):
