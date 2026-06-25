@@ -57,9 +57,12 @@ class ECU:
     def open_port(self):
         port = self.port or self._find_port()
         if port is None:
-            print("No Serial Port Found")
-            return False
-        
+            attempt += 1
+            if attempt == 1 or attempt % 10 == 0:
+                print(f"waiting for serial port on attempt {attempt}")
+            time.sleep(2)
+            port = self._find_port()
+
         try:
             self.ser = serial.Serial(
                                     port,
@@ -257,8 +260,10 @@ if __name__ == "__main__":
         loop = 0
         try:
             while True:
-                frame = ecu.poll()
-                ecu.log_frame(frame)
+                engine = ecu.poll()
+                chassis = ecu.poll_chassis() if loop % CHASSIS_EVERY == 0 else None
+                ecu.log_frame_dual(engine, chassis)
+                loop += 1
                 time.sleep(0.05)
         except KeyboardInterrupt:
             print("\nShutting Down")
