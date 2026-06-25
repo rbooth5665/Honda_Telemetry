@@ -115,8 +115,12 @@ class ECU:
         return buf
     
     def wakeup(self):
-        self.ser.send_break(0.070)
+        self.ser.break_condition = True
+        time.sleep(0.070)
+
+        self.ser.break_condition = False
         time.sleep(0.130)
+        
         return self.send_recv(self.WAKEUP_FRAME, 4)
     
     def connect(self, max_attempts=None, attempt_delay=0.2):
