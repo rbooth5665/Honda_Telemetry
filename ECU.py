@@ -13,7 +13,15 @@ class ECU:
     WAKEUP_FRAME = [0xFE, 0x04, 0x72, 0x8C] #transmitted wakeup frame
     DIAGNOSTIC_RESPONSE = bytearray(b'\x02\x04\x00\xfa') #expected response from ECU after diagnostic request
     DATA_REQUEST = [0x72, 0x07, 0x72, 0x11, 0x00, 0x14, 0xF0] #frame to request 26 bytes of data from ECU
-
+    
+    #A byte map of discerned and best guess values calculated from sensors
+    BYTE_MAP = ['RPM_1', 'RPM_2', 'TPS_pct', 
+                'TPS_voltage', 'b4', 'ECT', 
+                'b6', 'b7', 'b8', 'IAT_cand', 
+                'b10', 'b11', 'Battery_voltage', 
+                'b13', 'b14', 'b15', 'MAP_cand', 
+                'b17', 'b18', 'b19']
+    
     def __init__(self, port=None, timeout=1):
         self.port = port
         self.timeout = timeout
@@ -200,9 +208,6 @@ class ECU:
             self._log_file = None
             self._log_writer = None
 
-
-
-
 if __name__ == "__main__":
     ecu = ECU()
     if ecu.connect():
@@ -211,6 +216,7 @@ if __name__ == "__main__":
             while True:
                 frame = ecu.poll()
                 ecu.log_frame(frame)
+                print(f"{[hex(b) for b in frame]}")
                 time.sleep(0.05)
         except KeyboardInterrupt:
             print("\nShutting Down")
