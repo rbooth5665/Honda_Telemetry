@@ -253,14 +253,8 @@ if __name__ == "__main__":
         loop = 0
         try:
             while True:
-                engine = ecu.poll()
-                chassis = None
-
-                if loop % CHASSIS_EVERY == 0:
-                    chassis = ecu.poll_chassis()
-
-                ecu.log_frame_dual(engine, chassis)
-                loop += 1
+                frame = ecu.poll()
+                ecu.log_frame(frame)
                 time.sleep(0.05)
         except KeyboardInterrupt:
             print("\nShutting Down")
