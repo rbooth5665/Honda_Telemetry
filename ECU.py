@@ -175,7 +175,7 @@ class ECU:
         
         
         if filename == None:
-            stamp = datetime.now().strftime("%Y$m$d_%H%M%S")
+            stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             filename = f'ecu_log_{stamp}.csv'
 
         path = os.path.join(log_dir, filename)
