@@ -13,7 +13,17 @@ class ECU:
     WAKEUP_FRAME = [0xFE, 0x04, 0x72, 0x8C] #transmitted wakeup frame
     DIAGNOSTIC_RESPONSE = bytearray(b'\x02\x04\x00\xfa') #expected response from ECU after diagnostic request
     DATA_REQUEST = [0x72, 0x07, 0x72, 0x11, 0x00, 0x14, 0xF0] #frame to request 26 bytes of data from ECU
+    CHASSIS_REQUEST = [0x72, 0x07, 0x72, 0xD1, 0x00, 0x14, 0x30]
 
+
+    #A byte map of discerned and best guess values calculated from sensors
+    BYTE_MAP = ['RPM_1', 'RPM_2', 'TPS_pct', 
+                'TPS_voltage', 'b4', 'ECT', 
+                'b6', 'b7', 'b8', 'IAT_cand', 
+                'b10', 'b11', 'Battery_voltage', 
+                'b13', 'b14', 'b15', 'MAP_cand', 
+                'b17', 'b18', 'b19']
+    
     def __init__(self, port=None, timeout=1):
         self.port = port
         self.timeout = timeout
@@ -132,6 +142,9 @@ class ECU:
     def poll(self):
         return self.send_recv(self.DATA_REQUEST, 26)
     
+    def poll_chassis(self):
+        return self.send_recv(self.CHASSIS_REQUEST, 26)
+    
     def parse(self, frame):
         if len(frame) < 26:
             return None
@@ -170,6 +183,38 @@ class ECU:
         print(f"logging to file {path}")
         return path
 
+    def log_frame_dual(self, engine_frame, chassis_frame):
+        if not hasattr(self, "_log_writer") or self._log_writer is None:
+            raise RuntimeError("Must call start_log() first")
+
+        if engine_frame is None or len(engine_frame) < 26:
+            return None
+
+        e_data = list(engine_frame[5:-1]) if self._log_payload_only else list(engine_frame)
+
+        if chassis_frame is not None and len(chassis_frame) >= 26:
+            c_data = list(chassis_frame[5:-1]) if self._log_payload_only else list(chassis_frame)
+            self._last_chassis = c_data
+
+        else:
+            c_data = getattr(self, "_last_chassis", None) or [0] * len(e_data)
+
+        if not self._log_header_written:
+            self._log_start = time.time()
+            cols = (["sample", "elapsed_s", "wall_clock"]
+                    + [f"e{i}" for i in range(len(e_data))]
+                    + [f"c{i}" for i in range(len(c_data))])
+
+            self._log_writer.writerow(cols)
+            self._log_header_written = True
+
+        elapsed = round(time.time() - self._log_start, 3)
+        wall = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        self._log_writer.writerow([self._log_sample, elapsed, wall] + e_data + c_data)
+        self._log_sample += 1
+        return e_data, c_data
+
+
     def log_frame(self, frame):
         if not hasattr(self, "_log_writer") or self._log_writer is None:
             raise RuntimeError("Must call start_log() first")
@@ -200,17 +245,22 @@ class ECU:
             self._log_file = None
             self._log_writer = None
 
-
-
-
 if __name__ == "__main__":
     ecu = ECU()
     if ecu.connect():
         ecu.start_log()
+        CHASSIS_EVERY = 5
+        loop = 0
         try:
             while True:
-                frame = ecu.poll()
-                ecu.log_frame(frame)
+                engine = ecu.poll()
+                chassis = None
+
+                if loop % CHASSIS_EVERY == 0:
+                    chassis = ecu.poll_chassis()
+
+                ecu.log_frame_dual(engine, chassis)
+                loop += 1
                 time.sleep(0.05)
         except KeyboardInterrupt:
             print("\nShutting Down")
