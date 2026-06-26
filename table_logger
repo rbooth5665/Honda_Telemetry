@@ -1,0 +1,122 @@
+ 
+import time
+import csv
+import os
+from datetime import datetime
+from ECU import ECU
+ 
+ 
+# ---------------------------------------------------------------------------
+# CANDIDATE TABLES
+# Each entry: (label, request_frame). All verified read-only 0x72 requests.
+# The engine table (0x1100) is included as a reference so every row has RPM
+# (e0/e1) and TPS (e2) to correlate the candidates against motion.
+# ---------------------------------------------------------------------------
+CANDIDATES = [
+    ("eng_1100", [0x72, 0x07, 0x72, 0x11, 0x00, 0x14, 0xF0]),  # engine (reference: RPM/TPS)
+    ("cha_D100", [0x72, 0x07, 0x72, 0xD1, 0x00, 0x14, 0x30]),  # known chassis (c0/c4 flags)
+    # Tier 1 - adjacent to known tables (most likely to hold speed/gear)
+    ("adj_1114", [0x72, 0x07, 0x72, 0x11, 0x14, 0x14, 0xDC]),
+    ("adj_D114", [0x72, 0x07, 0x72, 0xD1, 0x14, 0x14, 0x1C]),
+    ("adj_D000", [0x72, 0x07, 0x72, 0xD0, 0x00, 0x14, 0x31]),
+    ("adj_D200", [0x72, 0x07, 0x72, 0xD2, 0x00, 0x14, 0x2F]),
+    # Tier 2 - other base regions
+    ("reg_1000", [0x72, 0x07, 0x72, 0x10, 0x00, 0x14, 0xF1]),
+    ("reg_1200", [0x72, 0x07, 0x72, 0x12, 0x00, 0x14, 0xEF]),
+    ("reg_1300", [0x72, 0x07, 0x72, 0x13, 0x00, 0x14, 0xEE]),
+    ("reg_2100", [0x72, 0x07, 0x72, 0x21, 0x00, 0x14, 0xE0]),
+    # Tier 3 - broader chassis-ish regions
+    ("reg_D300", [0x72, 0x07, 0x72, 0xD3, 0x00, 0x14, 0x2E]),
+    ("reg_D400", [0x72, 0x07, 0x72, 0xD4, 0x00, 0x14, 0x2D]),
+]
+ 
+# How many payload bytes to record per table. The 0x14 (20) length means
+# a 26-byte response; payload is bytes [5:-1] = 20 bytes. We pad/truncate
+# to this width so the CSV columns stay consistent even if a table is short.
+PAYLOAD_WIDTH = 20
+ 
+# Reference table (always polled every loop so every row has RPM/TPS).
+# This is the FIRST candidate (engine). The rest are scanned round-robin.
+REFERENCE_INDEX = 0
+ 
+ 
+def extract_payload(frame, width=PAYLOAD_WIDTH):
+    """Strip the 5-byte header + 1-byte checksum, pad/truncate to width."""
+    if frame is None or len(frame) < 6:
+        return [-1] * width  # -1 marks "no/invalid response"
+    payload = list(frame[5:-1])
+    if len(payload) < width:
+        payload += [0] * (width - len(payload))
+    return payload[:width]
+ 
+ 
+def main():
+    ecu = ECU()
+    if not ecu.connect():
+        print("Could not connect to ECU.")
+        return
+ 
+    os.makedirs("logs", exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    path = os.path.join("logs", f"table_scan_{stamp}.csv")
+    f = open(path, "w", newline="")
+    w = csv.writer(f)
+    print(f"scanning {len(CANDIDATES)} tables -> {path}")
+ 
+    # Header: sample, time, then for EACH candidate its width bytes, prefixed
+    # by a short tag so columns are identifiable (e.g. eng_1100_b0 ...).
+    header = ["sample", "elapsed_s", "wall_clock"]
+    for label, _ in CANDIDATES:
+        header += [f"{label}_b{i}" for i in range(PAYLOAD_WIDTH)]
+    w.writerow(header)
+ 
+    # Track the last good payload for each table (carry-forward between polls,
+    # since we only poll ONE non-reference table per loop to keep the rate up).
+    last = {label: [0] * PAYLOAD_WIDTH for label, _ in CANDIDATES}
+ 
+    start = time.time()
+    sample = 0
+    scan_idx = 0  # which non-reference candidate to poll this loop
+ 
+    try:
+        while True:
+            # Always poll the reference (engine) table -> fresh RPM/TPS each row
+            ref_label, ref_frame = CANDIDATES[REFERENCE_INDEX]
+            ref_resp = ecu.send_recv(ref_frame, 26)
+            last[ref_label] = extract_payload(ref_resp)
+ 
+            # Poll ONE other candidate this loop (round-robin through the rest)
+            # so each table gets sampled regularly without slowing the loop.
+            non_ref = [i for i in range(len(CANDIDATES)) if i != REFERENCE_INDEX]
+            idx = non_ref[scan_idx % len(non_ref)]
+            label, frame = CANDIDATES[idx]
+            resp = ecu.send_recv(frame, 26)
+            last[label] = extract_payload(resp)
+            scan_idx += 1
+ 
+            # Write the row: all tables' last-known payloads on one timeline
+            elapsed = round(time.time() - start, 3)
+            wall = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            row = [sample, elapsed, wall]
+            for lbl, _ in CANDIDATES:
+                row += last[lbl]
+            w.writerow(row)
+            sample += 1
+ 
+            # light heartbeat every ~5s so the journal shows it's alive
+            if sample % 100 == 0:
+                rpm = (last[ref_label][0] << 8) | last[ref_label][1]
+                print(f"sample {sample}  rpm {rpm}  (scanning {label})")
+ 
+            time.sleep(0.05)
+ 
+    except KeyboardInterrupt:
+        print("\nStopping scan")
+    finally:
+        f.close()
+        print(f"logged {sample} samples to {path}")
+        ecu.close()
+ 
+ 
+if __name__ == "__main__":
+    main()

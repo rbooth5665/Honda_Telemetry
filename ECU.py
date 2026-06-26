@@ -15,7 +15,6 @@ class ECU:
     DATA_REQUEST = [0x72, 0x07, 0x72, 0x11, 0x00, 0x14, 0xF0] #frame to request 26 bytes of data from ECU
     CHASSIS_REQUEST = [0x72, 0x07, 0x72, 0xD1, 0x00, 0x14, 0x30]
 
-
     #A byte map of discerned and best guess values calculated from sensors
     BYTE_MAP = ['RPM_1', 'RPM_2', 'TPS_pct', 
                 'TPS_voltage', 'b4', 'ECT', 
@@ -152,7 +151,43 @@ class ECU:
     
     def poll_chassis(self):
         return self.send_recv(self.CHASSIS_REQUEST, 26)
-    
+        #a response is valid if it has at least a checksum byte and the
+        #last byte equals the honda checksum of everything before it
+        if response is None or len(response) < 2:
+            return False
+        return ECU.honda_checksum(response[:-1]) == response[-1]
+
+    def scan_tables(self, candidates, settle=0.1, verbose=True):
+        #sends each candidate read request, drains the full response
+        #(unknown length), and returns only those that came back with a
+        #valid checksum. READ-ONLY: candidates should all use the 0x72
+        #read command. Returns a list of dicts: {request, response, length}.
+        results = []
+
+        for frame in candidates:
+            #greedy-drain read since each table's length is unknown
+            resp = self.send_recv(frame, recv_len=None)
+            ok = self.valid_response(resp)
+
+            if verbose:
+                req_hex = " ".join(f"{b:02X}" for b in frame)
+                if ok:
+                    print(f"[VALID] req {req_hex} -> {len(resp)} bytes: {resp.hex()}")
+                else:
+                    n = len(resp) if resp is not None else 0
+                    print(f"[ ---- ] req {req_hex} -> {n} bytes (no valid response)")
+
+            if ok:
+                results.append({
+                    "request": list(frame),
+                    "response": bytes(resp),
+                    "length": len(resp),
+                })
+
+            #brief settle between probes so the ECU is ready for the next
+            time.sleep(settle)
+        return results
+
     def parse(self, frame):
         if len(frame) < 26:
             return None
@@ -221,7 +256,6 @@ class ECU:
         self._log_writer.writerow([self._log_sample, elapsed, wall] + e_data + c_data)
         self._log_sample += 1
         return e_data, c_data
-
 
     def log_frame(self, frame):
         if not hasattr(self, "_log_writer") or self._log_writer is None:
