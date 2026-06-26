@@ -1,307 +1,225 @@
 import serial
 import serial.tools.list_ports
 import time
-import struct
 import csv
-from datetime import datetime
 import os
+from datetime import datetime
+
 
 class ECU:
     BAUD = 10400
-    READ_BYTE = [0x72] #established message typing, 0x72 being read requests
-    WAKEUP_RESPONSE = bytearray(b'\x0E\x04r|') #expected response from ECU after wakeup message
-    WAKEUP_FRAME = [0xFE, 0x04, 0x72, 0x8C] #transmitted wakeup frame
-    DIAGNOSTIC_RESPONSE = bytearray(b'\x02\x04\x00\xfa') #expected response from ECU after diagnostic request
-    DATA_REQUEST = [0x72, 0x07, 0x72, 0x11, 0x00, 0x14, 0xF0] #frame to request 26 bytes of data from ECU
-    CHASSIS_REQUEST = [0x72, 0x07, 0x72, 0xD1, 0x00, 0x14, 0x30]
+    HEADER_LEN = 4
+    WAKEUP_FRAME = [0xFE, 0x04, 0x72, 0x8C]
+    WAKEUP_RESPONSE = bytearray(b'\x0E\x04\x72\x7C')
 
-    #A byte map of discerned and best guess values calculated from sensors
-    BYTE_MAP = ['RPM_1', 'RPM_2', 'TPS_pct', 
-                'TPS_voltage', 'b4', 'ECT', 
-                'b6', 'b7', 'b8', 'IAT_cand', 
-                'b10', 'b11', 'Battery_voltage', 
-                'b13', 'b14', 'b15', 'MAP_cand', 
-                'b17', 'b18', 'b19']
-    
+    REQ_ENGINE = [0x72, 0x05, 0x71, 0x11, 0x07]
+    REQ_GEAR   = [0x72, 0x05, 0x71, 0xD1, 0x47]
+    GEAR_STATE = {0x03: "N", 0x01: "CLUTCH", 0x00: "GEAR"}
+    GEAR_RATIO_EDGES = [(114, 1), (87, 2), (74, 3), (66, 4), (59, 5), (0, 6)]
+
     def __init__(self, port=None, timeout=1):
         self.port = port
         self.timeout = timeout
         self.ser = None
         self.connected = False
+        self._last_gear = 0    
 
-        self.tps_closed = 25
-        self.tps_open = 231
-        
     @staticmethod
-    def honda_checksum(data): #returns the honda checksum for a list of bytes as a hex value
+    def honda_checksum(data):
         return ((sum(bytearray(data)) ^ 0xFF) + 1) & 0xFF
-    
-    @staticmethod
-    def build_frame(mtype, data): #builds the message frame as a list of bytes
-    #[type][length][data][checksum]
-        length = len(mtype) + len(data) + 0x02 #length of the message, data, and 2 additional bytes
-        frame = mtype + [length] + data
-        cksum = ECU.honda_checksum(frame)
-        return frame + [cksum]
-    
+
     def _find_port(self):
-        ports = serial.tools.list_ports.comports()
-        for p in ports:
-            desc = (p.description or "").lower()
-            manf = (p.manufacturer or "").lower()
-            if "ftdi" in desc or "ftdi" in manf:
+        for p in serial.tools.list_ports.comports():
+            blob = f"{p.description or ''} {p.manufacturer or ''}".lower()
+            if "ftdi" in blob:
                 return p.device
         return None
-    
-    def open_port(self):
+
+    def open_port(self, wait=True, retry_delay=2):
         port = self.port or self._find_port()
         attempt = 0
-        while port is None:
+        while port is None and wait:
             attempt += 1
-            if attempt % 10 == 0:
-                print(f"waiting for serial port on attempt {attempt}")
-            time.sleep(2)
+            if attempt == 1 or attempt % 10 == 0:
+                print(f"Waiting for serial port... (attempt {attempt})")
+            time.sleep(retry_delay)
             port = self._find_port()
+        if port is None:
+            print("No serial port found")
+            return False
 
         try:
-            self.ser = serial.Serial(
-                                    port,
-                                    self.BAUD,
-                                    serial.EIGHTBITS,
-                                    serial.PARITY_NONE, 
-                                    serial.STOPBITS_ONE, 
-                                    timeout=self.timeout
-                                    )
+            self.ser = serial.Serial(port, self.BAUD, serial.EIGHTBITS,
+                                     serial.PARITY_NONE, serial.STOPBITS_ONE,
+                                     timeout=self.timeout)
             self.ser.reset_input_buffer()
+            print(f"Found serial port: {port}")
             return True
         except serial.SerialException as e:
             print(f"Failed to open port: {e}")
             return False
-        
+
+    def wakeup(self):
+        self.ser.break_condition = True
+        time.sleep(0.070)
+        self.ser.break_condition = False
+        time.sleep(0.130)
+        return self.send_recv(self.WAKEUP_FRAME, 4)
+
+    def connect(self, max_attempts=None, attempt_delay=0.2):
+        if self.ser is None and not self.open_port():
+            return False
+        attempt = 0
+        while max_attempts is None or attempt < max_attempts:
+            attempt += 1
+            if self.wakeup() == self.WAKEUP_RESPONSE:
+                self.connected = True
+                print(f"Connected on attempt {attempt}")
+                return True
+            if attempt % 10 == 0:
+                print(f"Still waiting on attempt {attempt}")
+            time.sleep(attempt_delay)
+        return False
+
+    def close(self):
+        if self.ser and self.ser.is_open:
+            self.ser.close()
+        self.connected = False
+
     def send_recv(self, frame, recv_len=None, timeout=0.5):
-        #flush, send, read echo
         self.ser.reset_input_buffer()
         self.ser.write(bytes(frame))
         self.ser.read(len(frame))
-    
-        #byte structure
+
         buf = bytearray()
         end = time.time() + timeout
-        
-        #message length is known
         if recv_len is not None:
             while len(buf) < recv_len and time.time() < end:
                 chunk = self.ser.read(recv_len - len(buf))
                 if chunk:
                     buf.extend(chunk)
-        
-        #message length is not known, has timeout for raw probing
-        else:
-            original = self.ser.timeout
-            self.ser.timeout = .05
-            
+        else:                               
+            original, self.ser.timeout = self.ser.timeout, 0.05
             try:
-                last_rx = time.time()
+                last = time.time()
                 while time.time() < end:
                     chunk = self.ser.read(64)
-                    #if the ECU is actively transmitting, append to the buffer and reset the time
                     if chunk:
                         buf.extend(chunk)
-                        last_rx = time.time()
-                    #transmission hasn't occured recently, safe to assume the ECU is done communicating
-                    elif time.time() - last_rx > self.ser.timeout:
+                        last = time.time()
+                    elif time.time() - last > self.ser.timeout:
                         break
             finally:
                 self.ser.timeout = original
-
-        #returns bytearray of the ECU response
         return buf
-    
-    def wakeup(self):
-        self.ser.break_condition = True
-        time.sleep(0.070)
 
-        self.ser.break_condition = False
-        time.sleep(0.130)
-        
-        return self.send_recv(self.WAKEUP_FRAME, 4)
-    
-    def connect(self, max_attempts=None, attempt_delay=0.2):
-        if self.ser is None and not self.open_port():
-            return False
-
-        attempt = 0
-        while max_attempts is None or attempt < max_attempts:
-            attempt += 1
-            recv = self.wakeup()
-            if recv == self.WAKEUP_RESPONSE:
-                self.connected = True
-                print(f"Connected on attempt: {attempt}")
-                return True
-            if recv:
-                print(f"Unexpected response: {[hex(b) for b in recv]}")
-            elif attempt % 10 == 0:
-                print(f"Still waiting on attempt {attempt}")
-            time.sleep(attempt_delay)
-        
-        return False
-    
-    def poll(self):
-        return self.send_recv(self.DATA_REQUEST, 26)
-    
-    def poll_chassis(self):
-        return self.send_recv(self.CHASSIS_REQUEST, 26)
-        #a response is valid if it has at least a checksum byte and the
-        #last byte equals the honda checksum of everything before it
-        if response is None or len(response) < 2:
-            return False
-        return ECU.honda_checksum(response[:-1]) == response[-1]
-
-    def scan_tables(self, candidates, settle=0.1, verbose=True):
-        #sends each candidate read request, drains the full response
-        #(unknown length), and returns only those that came back with a
-        #valid checksum. READ-ONLY: candidates should all use the 0x72
-        #read command. Returns a list of dicts: {request, response, length}.
-        results = []
-
-        for frame in candidates:
-            #greedy-drain read since each table's length is unknown
-            resp = self.send_recv(frame, recv_len=None)
-            ok = self.valid_response(resp)
-
-            if verbose:
-                req_hex = " ".join(f"{b:02X}" for b in frame)
-                if ok:
-                    print(f"[VALID] req {req_hex} -> {len(resp)} bytes: {resp.hex()}")
-                else:
-                    n = len(resp) if resp is not None else 0
-                    print(f"[ ---- ] req {req_hex} -> {n} bytes (no valid response)")
-
-            if ok:
-                results.append({
-                    "request": list(frame),
-                    "response": bytes(resp),
-                    "length": len(resp),
-                })
-
-            #brief settle between probes so the ECU is ready for the next
-            time.sleep(settle)
-        return results
-
-    def parse(self, frame):
-        if len(frame) < 26:
+    def _payload(self, resp):
+        if resp is None or len(resp) < self.HEADER_LEN + 1:
             return None
-        
-        d = frame[5:]
+        return list(resp[self.HEADER_LEN:-1])
 
-        rpm = (d[0] << 8) | d[1]
-        tps = (d[2] - self.tps_closed) / (self.tps_open - self.tps_closed) * 100
-        tps = max(0.0, min(100.0, tps))
+    def poll_engine(self):
+        return self._payload(self.send_recv(self.REQ_ENGINE))
 
-        return {"rpm": rpm, "tps_pct": round(tps, 1)}
-    
-    def close(self):
-        if self.ser and self.ser.is_open:
-            self.ser.close()
-        
-        self.connected = False
+    def poll_gear(self):
+        return self._payload(self.send_recv(self.REQ_GEAR))
 
-    def start_log(self, filename=None, log_dir="logs", payload_only=True):
-        os.makedirs(log_dir, exist_ok=True)
-        
-        
-        if filename == None:
+    def gear_from_ratio(self, rpm, speed):
+        if speed is None or speed < 3 or rpm < 1000:
+            return self._last_gear          
+        ratio = rpm / speed
+        for edge, g in self.GEAR_RATIO_EDGES:
+            if ratio > edge:
+                self._last_gear = g
+                return g
+        return self._last_gear
+
+    def decode(self, eng, gear):
+        out = {}
+        if eng and len(eng) > 13:
+            out["rpm"] = (eng[0] << 8) | eng[1]
+            out["speed_kmh"] = eng[13]
+            out["speed_mph"] = round(eng[13] * 0.621371, 1)
+        if gear:
+            raw = gear[0]
+            out["clutch_state"] = self.GEAR_STATE.get(raw, f"0x{raw:02X}")
+            if raw == 0x03:
+                out["gear"] = 0             # neutral
+            elif raw == 0x01:
+                out["gear"] = self._last_gear   # clutch in: hold
+            elif "rpm" in out and "speed_kmh" in out:
+                out["gear"] = self.gear_from_ratio(out["rpm"], out["speed_kmh"])
+        return out
+
+class Logger:
+    def __init__(self, ecu, log_dir="logs", width=20):
+        self.ecu = ecu
+        self.log_dir = log_dir
+        self.width = width
+        self._f = self._w = None
+        self._sample = 0
+        self._start = None
+
+    def start(self, filename=None):
+        os.makedirs(self.log_dir, exist_ok=True)
+        if filename is None:
             stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            filename = f'ecu_log_{stamp}.csv'
-
-        path = os.path.join(log_dir, filename)
-
-        self._log_file = open(path, 'w', newline='')
-        self._log_writer = csv.writer(self._log_file)
-        self._log_payload_only = payload_only
-        self._log_header_written = False
-        self._log_sample = 0
-        self._log_start = None
-        self._log_name = path
-        print(f"logging to file {path}")
+            filename = f"ecu_log_{stamp}.csv"
+        path = os.path.join(self.log_dir, filename)
+        self._f = open(path, "w", newline="")
+        self._w = csv.writer(self._f)
+        self._w.writerow(
+            ["sample", "elapsed_s", "wall_clock",
+             "rpm", "speed_kmh", "gear", "clutch_state"]
+            + [f"t11_b{i}" for i in range(self.width)]
+            + [f"d1_b{i}" for i in range(self.width)])
+        self._start = time.time()
+        self._sample = 0
+        print(f"logging -> {path}")
+        self.path = path
         return path
 
-    def log_frame_dual(self, engine_frame, chassis_frame):
-        if not hasattr(self, "_log_writer") or self._log_writer is None:
-            raise RuntimeError("Must call start_log() first")
+    @staticmethod
+    def _fit(payload, width):
+        if not payload:
+            return [-1] * width
+        return (payload + [0] * width)[:width]
 
-        if engine_frame is None or len(engine_frame) < 26:
-            return None
-
-        e_data = list(engine_frame[5:-1]) if self._log_payload_only else list(engine_frame)
-
-        if chassis_frame is not None and len(chassis_frame) >= 26:
-            c_data = list(chassis_frame[5:-1]) if self._log_payload_only else list(chassis_frame)
-            self._last_chassis = c_data
-
-        else:
-            c_data = getattr(self, "_last_chassis", None) or [0] * len(e_data)
-
-        if not self._log_header_written:
-            self._log_start = time.time()
-            cols = (["sample", "elapsed_s", "wall_clock"]
-                    + [f"e{i}" for i in range(len(e_data))]
-                    + [f"c{i}" for i in range(len(c_data))])
-
-            self._log_writer.writerow(cols)
-            self._log_header_written = True
-
-        elapsed = round(time.time() - self._log_start, 3)
+    def log(self, eng, gear):
+        dec = self.ecu.decode(eng, gear)
+        elapsed = round(time.time() - self._start, 3)
         wall = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        self._log_writer.writerow([self._log_sample, elapsed, wall] + e_data + c_data)
-        self._log_sample += 1
-        return e_data, c_data
+        self._w.writerow(
+            [self._sample, elapsed, wall,
+             dec.get("rpm", -1), dec.get("speed_kmh", -1),
+             dec.get("gear", -1), dec.get("clutch_state", "NA")]
+            + self._fit(eng, self.width)
+            + self._fit(gear, self.width))
+        self._sample += 1
+        return dec
 
-    def log_frame(self, frame):
-        if not hasattr(self, "_log_writer") or self._log_writer is None:
-            raise RuntimeError("Must call start_log() first")
-
-        if len(frame) < 26:
-            return None
-        
-        data = list(frame[5:-1]) if self._log_payload_only else list(frame)
-
-        if not self._log_header_written:
-            self._log_start = time.time()
-            cols = (["sample", "elapsed_s", "wall_clock"]
-                    + [f"b{i}" for i in range(len(data))])
-            
-            self._log_writer.writerow(cols)
-            self._log_header_written = True
-
-        elapsed = round(time.time() - self._log_start, 3)
-        wall = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        self._log_writer.writerow([self._log_sample, elapsed, wall] + data)
-        self._log_sample += 1
-        return data
-    
-    def stop_log(self):
-        if getattr(self, "_log_file", None):
-            self._log_file.close()
-            print(f"logged {self._log_sample} samples to {self._log_name}")
-            self._log_file = None
-            self._log_writer = None
+    def stop(self):
+        if self._f:
+            self._f.close()
+            print(f"logged {self._sample} samples to {self.path}")
+            self._f = self._w = None
 
 if __name__ == "__main__":
     ecu = ECU()
     if ecu.connect():
-        ecu.start_log()
-        CHASSIS_EVERY = 5
-        loop = 0
+        log = Logger(ecu)
+        log.start()
         try:
             while True:
-                engine = ecu.poll()
-                chassis = ecu.poll_chassis() if loop % CHASSIS_EVERY == 0 else None
-                ecu.log_frame_dual(engine, chassis)
-                loop += 1
+                eng = ecu.poll_engine()
+                gear = ecu.poll_gear()
+                dec = log.log(eng, gear)
+                if log._sample % 40 == 0:
+                    print(f"rpm {dec.get('rpm')}  "
+                          f"{dec.get('speed_mph')} mph  gear {dec.get('gear')}")
                 time.sleep(0.05)
         except KeyboardInterrupt:
-            print("\nShutting Down")
+            print("\nShutting down")
         finally:
-            ecu.stop_log()
+            log.stop()
             ecu.close()
