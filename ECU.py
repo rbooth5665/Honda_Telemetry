@@ -7,22 +7,24 @@ from datetime import datetime
 
 
 class ECU:
-    BAUD = 10400
-    HEADER_LEN = 4
     WAKEUP_FRAME = [0xFE, 0x04, 0x72, 0x8C]
     WAKEUP_RESPONSE = bytearray(b'\x0E\x04\x72\x7C')
-
-    REQ_ENGINE = [0x72, 0x05, 0x71, 0x11, 0x07]
-    REQ_GEAR   = [0x72, 0x05, 0x71, 0xD1, 0x47]
-    GEAR_STATE = {0x03: "N", 0x01: "CLUTCH", 0x00: "GEAR"}
+    REQ_ENGINE = [0x72, 0x05, 0x71, 0x11, 0x07]    
+    HEADER_LEN = 4          
+    PAYLOAD_BYTES = 18      
+    RESP_LEN = HEADER_LEN + PAYLOAD_BYTES + 1 
+ 
     GEAR_RATIO_EDGES = [(114, 1), (87, 2), (74, 3), (66, 4), (59, 5), (0, 6)]
+    GEAR_HYST = 3          
 
     def __init__(self, port=None, timeout=1):
         self.port = port
         self.timeout = timeout
         self.ser = None
         self.connected = False
-        self._last_gear = 0    
+        self._last_gear = 0
+        self._gcand = 0       
+        self._gcount = 0
 
     @staticmethod
     def honda_checksum(data):
@@ -86,104 +88,93 @@ class ECU:
             self.ser.close()
         self.connected = False
 
-    def send_recv(self, frame, recv_len=None, timeout=0.5):
+    def send_recv(self, frame, recv_len, timeout=0.5):
         self.ser.reset_input_buffer()
         self.ser.write(bytes(frame))
         self.ser.read(len(frame))
 
         buf = bytearray()
         end = time.time() + timeout
-        if recv_len is not None:
-            while len(buf) < recv_len and time.time() < end:
-                chunk = self.ser.read(recv_len - len(buf))
-                if chunk:
-                    buf.extend(chunk)
-        else:                               
-            original, self.ser.timeout = self.ser.timeout, 0.05
-            try:
-                last = time.time()
-                while time.time() < end:
-                    chunk = self.ser.read(64)
-                    if chunk:
-                        buf.extend(chunk)
-                        last = time.time()
-                    elif time.time() - last > self.ser.timeout:
-                        break
-            finally:
-                self.ser.timeout = original
+    
+        while len(buf) < recv_len and time.time() < end:
+            chunk = self.ser.read(recv_len - len(buf))
+            if chunk:
+                buf.extend(chunk)
+       
         return buf
 
-    def _payload(self, resp):
-        if resp is None or len(resp) < self.HEADER_LEN + 1:
+    def poll_engine(self):
+        resp = self.send_recv(self.REQ_ENGINE, self.RESP_LEN, timeout=0.15)
+        if len(resp) < self.HEADER_LEN + 14:
             return None
         return list(resp[self.HEADER_LEN:-1])
 
-    def poll_engine(self):
-        return self._payload(self.send_recv(self.REQ_ENGINE))
 
-    def poll_gear(self):
-        return self._payload(self.send_recv(self.REQ_GEAR))
-
-    def gear_from_ratio(self, rpm, speed):
-        if speed is None or speed < 3 or rpm < 1000:
-            return self._last_gear          
+    def _gear(self, rpm, speed):   
+        if speed < 3 or rpm < 1000:
+            return self._last_gear             
         ratio = rpm / speed
-        for edge, g in self.GEAR_RATIO_EDGES:
-            if ratio > edge:
-                self._last_gear = g
-                return g
+        raw = next(g for edge, g in self.GEAR_RATIO_EDGES if ratio > edge)
+        if raw == self._last_gear:
+            self._gcand, self._gcount = raw, 0
+        elif raw == self._gcand:
+            self._gcount += 1
+            if self._gcount >= self.GEAR_HYST:
+                self._last_gear = raw
+        else:
+            self._gcand, self._gcount = raw, 1
         return self._last_gear
 
-    def decode(self, eng, gear):
-        out = {}
-        if eng and len(eng) > 13:
-            out["rpm"] = (eng[0] << 8) | eng[1]
-            out["speed_kmh"] = eng[13]
-            out["speed_mph"] = round(eng[13] * 0.621371, 1)
-        if gear:
-            raw = gear[0]
-            out["clutch_state"] = self.GEAR_STATE.get(raw, f"0x{raw:02X}")
-            if raw == 0x03:
-                out["gear"] = 0             # neutral
-            elif raw == 0x01:
-                out["gear"] = self._last_gear   # clutch in: hold
-            elif "rpm" in out and "speed_kmh" in out:
-                out["gear"] = self.gear_from_ratio(out["rpm"], out["speed_kmh"])
+    UNKNOWN_BYTES = [14, 15, 16, 17, 18, 19]
+
+    def decode(self, eng):
+        if not eng or len(eng) <= 13:
+            return None
+        rpm = (eng[0] << 8) | eng[1]
+        speed_kmh = eng[13]
+        out = {
+            "rpm": rpm,
+            "speed_kmh": speed_kmh,
+            "speed_mph": round(speed_kmh * 0.621371, 1),
+            "gear": self._gear(rpm, speed_kmh),
+            "tps": round(eng[3] / 16 * 10, 1),
+            "ect_c": eng[5] - 40,
+            "iat_c": eng[7] - 40,
+            "map_kpa": eng[9],
+            "batt": round(eng[12] / 10, 1),
+        }
+
+        for i in self.UNKNOWN_BYTES:
+            out[f"b{i}"] = eng[i] if i < len(eng) else -1
         return out
 
+
 class Logger:
-    def __init__(self, ecu, log_dir="logs", width=20):
-        self.ecu = ecu
+
+    UNKNOWN_BYTES = ECU.UNKNOWN_BYTES
+    COLS = (["sample", "elapsed_s", "dt_ms", "rpm", "speed_kmh", "speed_mph",
+             "gear", "tps", "ect_c", "iat_c", "map_kpa", "batt"]
+            + [f"b{i}" for i in UNKNOWN_BYTES])
+
+    def __init__(self, log_dir="logs"):
         self.log_dir = log_dir
-        self.width = width
         self._f = self._w = None
         self._sample = 0
-        self._start = None
+        self._start = self._last_t = None
 
     def start(self, filename=None):
         os.makedirs(self.log_dir, exist_ok=True)
         if filename is None:
             stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             filename = f"ecu_log_{stamp}.csv"
-        path = os.path.join(self.log_dir, filename)
-        self._f = open(path, "w", newline="")
+        self.path = os.path.join(self.log_dir, filename)
+        self._f = open(self.path, "w", newline="")
         self._w = csv.writer(self._f)
-        self._w.writerow(
-            ["sample", "elapsed_s", "wall_clock",
-             "rpm", "speed_kmh", "gear", "clutch_state"]
-            + [f"t11_b{i}" for i in range(self.width)]
-            + [f"d1_b{i}" for i in range(self.width)])
-        self._start = time.time()
+        self._w.writerow(self.COLS)
+        self._start = self._last_t = time.time()
         self._sample = 0
-        print(f"logging -> {path}")
-        self.path = path
-        return path
-
-    @staticmethod
-    def _fit(payload, width):
-        if not payload:
-            return [-1] * width
-        return (payload + [0] * width)[:width]
+        print(f"logging -> {self.path}")
+        return self.path
 
     def log(self, eng, gear):
         dec = self.ecu.decode(eng, gear)
@@ -198,26 +189,43 @@ class Logger:
         self._sample += 1
         return dec
 
+    def log(self, dec):
+        now = time.time()
+        dt_ms = round((now - self._last_t) * 1000, 1)
+        self._last_t = now
+        self._w.writerow([self._sample, round(now - self._start, 3), dt_ms,
+                          dec["rpm"], dec["speed_kmh"], dec["speed_mph"],
+                          dec["gear"], dec["tps"], dec["ect_c"], dec["iat_c"],
+                          dec["map_kpa"], dec["batt"]]
+                         + [dec[f"b{i}"] for i in self.UNKNOWN_BYTES])
+        self._sample += 1
+
     def stop(self):
         if self._f:
             self._f.close()
-            print(f"logged {self._sample} samples to {self.path}")
+            total = time.time() - self._start
+            rate = self._sample / total if total else 0
+            print(f"logged {self._sample} samples to {self.path}  ({rate:.1f} Hz avg)")
             self._f = self._w = None
+
 
 if __name__ == "__main__":
     ecu = ECU()
     if ecu.connect():
-        log = Logger(ecu)
+        log = Logger()
         log.start()
         try:
             while True:
                 eng = ecu.poll_engine()
-                gear = ecu.poll_gear()
-                dec = log.log(eng, gear)
-                if log._sample % 40 == 0:
-                    print(f"rpm {dec.get('rpm')}  "
-                          f"{dec.get('speed_mph')} mph  gear {dec.get('gear')}")
-                time.sleep(0.05)
+                if eng is None:
+                    continue
+                dec = ecu.decode(eng)
+                if dec is None:
+                    continue
+                log.log(dec)
+                if log._sample % 50 == 0:
+                    print(f"rpm {dec['rpm']}  {dec['speed_mph']} mph  "
+                          f"gear {dec['gear']}  ect {dec['ect_c']}C")
         except KeyboardInterrupt:
             print("\nShutting down")
         finally:
