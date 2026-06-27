@@ -7,6 +7,7 @@ from datetime import datetime
 
 
 class ECU:
+    BAUD = 10400
     WAKEUP_FRAME = [0xFE, 0x04, 0x72, 0x8C]
     WAKEUP_RESPONSE = bytearray(b'\x0E\x04\x72\x7C')
     REQ_ENGINE = [0x72, 0x05, 0x71, 0x11, 0x07]    
