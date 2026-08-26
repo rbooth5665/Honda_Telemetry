@@ -11,16 +11,16 @@
 #define UART_TX_PIN GPIO_NUM_17
 #define UART_RX_PIN GPIO_NUM_16
 
-//ECU wakeup frame, response, and buffer validation
+//ECU wakeup frame, response buffer, and buffer validation
 const uint8_t WAKEUP_FRAME[] = {0xFE, 0x04, 0x72, 0x8C};
 const uint8_t WAKEUP_RESPONSE[] = {0x0E, 0x04, 0x72, 0x7C};
 uint8_t WAKEUP_RESPONSE_BUFFER[8];
 
-//Data request frame,response, and raw data buffer
+//Data request frame, raw response buffer, cleaned response buffer
 const uint8_t DIAG_FRAME[] = {0x72, 0x05, 0x71, 0x11, 0x07};
-const int DIAG_RESPONSE_SIZE = 26;
 uint8_t RAW_RESPONSE_BUFFER[31];
-uint8_t CLEAN_RESPONSE_BUFFER[21];
+uint8_t CLEAN_RESPONSE_BUFFER[26];
+uint8_t PAYLOAD_BUFFER[21];
 
 /*
 UART definition for hex transmission:
@@ -40,7 +40,7 @@ uart_config_t uart_config = {
 /*
 Enum states to carry machine state from:
 1. Connect
-2. Diagnostic polling
+2. polling
 3. Disconnect
 */
 enum States {
@@ -105,38 +105,67 @@ void send_frame(uint8_t* frame, int frame_size) {
 }
 //receive frame function, returns length of frame
 int receive_frame(uint8_t* buffer, int buffer_size) { 
+
     //Moves UART data into buffer array
     int len = uart_read_bytes(UART_NUM_2, buffer, buffer_size, 100 / portTICK_PERIOD_MS);
 
     //returns length of frame receieved or 0
     return len;
 }
-
+//cleans the echo from data request, fills the clean array with 26 data bytes
+void clean_frame(uint8_t* raw, int raw_length, uint8_t* clean) {
+    //Removes echo request from raw frame
+    int offset = 5;
+    for(int i = offset; i < raw_length; i++) {
+        clean[i - offset] = raw[i];
+    }
+    printf("Clean_frame performed.\n");
+}
+//removes the 5 bytes of header from data frame, fills array with 21 byte payload
+void strip_header(uint8_t* unstripped, int unstripped_length, uint8_t* stripped) {
+    //removes 4 byte initializer and checksum byte
+    int offset = 4;
+    for(int i = offset; i < unstripped_length - 1; i++) {
+        stripped[i - offset] = unstripped[i];
+    }
+    printf("Strip_header performed.\n");
+}
 
 //------------------------Frame Sending Methods------------------------//
 //sends ECU wakeup hex, reads response and validates. Returns True or False
-bool ecu_wakeup() {
-    //sends wakeup frame to ECU
-    send_frame((uint8_t*)WAKEUP_FRAME, sizeof(WAKEUP_FRAME));
+bool ecu_wakeup(int retry) {
+    int len = 0;
+    //while len is 0 and retry > 0 continue sending frame
+    while(len != 8 && retry > 0) {
+        //sends wakeup frame to ECU
+        send_frame((uint8_t*)WAKEUP_FRAME, sizeof(WAKEUP_FRAME));
 
-    //read echo and response into wakeup buffer
-    int len = uart_read_bytes(UART_NUM_2, (uint8_t*)WAKEUP_RESPONSE_BUFFER, sizeof(WAKEUP_RESPONSE_BUFFER) + sizeof(WAKEUP_FRAME), 100 / portTICK_PERIOD_MS);
+        //read echo and response into wakeup buffer
+        len = uart_read_bytes(UART_NUM_2, (uint8_t*)WAKEUP_RESPONSE_BUFFER, sizeof(WAKEUP_RESPONSE_BUFFER), 100 / portTICK_PERIOD_MS);
+        retry--;
+
+        //waits 1 second
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
 
     //checks received length
     if(len != 8) {
+        printf("ECU Frame sending failed with Length: %d\n", len);
         return false;
     }
     else {
         //compares response buffer to wakeup frame
         int offset = sizeof(WAKEUP_FRAME);
         for(int i = 0; i < sizeof(WAKEUP_RESPONSE); i++) {
-            //buffer is 4 byte echo followed by 5 byte response
+            //buffer is 4 byte echo followed by 4 byte response
             if(WAKEUP_RESPONSE[i] != WAKEUP_RESPONSE_BUFFER[i + offset]) {
+                printf("Received ECU handshake is different than expected.\n");
                 return false;
             }
         }
     }
 
+    printf("ECU Wakeup successful\n");
     return true;
 }
 //sends data polling hex, fills buffer array with all 26 bytes
@@ -145,30 +174,49 @@ bool poll() {
     send_frame((uint8_t*)DIAG_FRAME, sizeof(DIAG_FRAME));
 
     //reads echo and response into diag buffer
-    int len = uart_read_bytes(UART_NUM_2, (uint8_t*)RAW_RESPONSE_BUFFER, DIAG_RESPONSE_SIZE + sizeof(DIAG_FRAME), 100 / portTICK_PERIOD_MS);
+    int len = uart_read_bytes(UART_NUM_2, (uint8_t*)RAW_RESPONSE_BUFFER, sizeof(RAW_RESPONSE_BUFFER), 100 / portTICK_PERIOD_MS);
     
     //checks received length
-    if(len != DIAG_RESPONSE_SIZE + sizeof(DIAG_FRAME)) {
+    if(len != sizeof(RAW_RESPONSE_BUFFER)) {
+        printf("Polling failed, length not the expected 31 bytes\n");
         return false;
     }
-    
-    //if length check passes, assume data poll successful
+    else {
+        //takes the full 31 bytes into raw buffer, parses to 26 bytes, validates, parses to 21 bytes
+        clean_frame(RAW_RESPONSE_BUFFER, sizeof(RAW_RESPONSE_BUFFER), CLEAN_RESPONSE_BUFFER);
+
+        //verifies the checksum of the clean 26 byte frame. If it fails, return false
+        if(!validate_frame(CLEAN_RESPONSE_BUFFER, sizeof(CLEAN_RESPONSE_BUFFER))) {
+            printf("Checksum validation for cleaned 26 byte frame failed.\n");
+            return false;
+        }
+        //Strips remaining 5 header bytes and fills the payload into payload buffer
+        else {
+            strip_header(CLEAN_RESPONSE_BUFFER, sizeof(CLEAN_RESPONSE_BUFFER), PAYLOAD_BUFFER);
+        }
+    }
+    //if length check and checksum validation passes
+    printf("Data polled successfully, passed to 21 bytes.\n");
     return true;
 }
-//cleans 26-byte data buffer, passes to stripped data array
-
 
 void app_main() {
     handshake_connect();
     uart_setup();
 
-
-    /*
-    while loop:
-     handshake sequence
-     wakeup frame
-     validate response
-     diagnostic frame
-     read, validate, store
-    */
+    if(ecu_wakeup(30)) {
+        while(1) {
+            //polls data, returns true if bytes are received. Bytes are now stored in PAYLOAD_BUFFER
+            if(poll()) {
+                //prints all 21 bytes in a single line
+                for(int i = 0; i < sizeof(PAYLOAD_BUFFER); i++) {
+                    printf("%02X ", PAYLOAD_BUFFER[i]);
+                }
+                printf("\n");
+           }
+        }
+    }
+    else {
+        printf("ECU Handshake Failed\n");
+    }
 }
