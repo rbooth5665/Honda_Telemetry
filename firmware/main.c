@@ -18,9 +18,9 @@ uint8_t WAKEUP_RESPONSE_BUFFER[8];
 
 //Data request frame, raw response buffer, cleaned response buffer
 const uint8_t DIAG_FRAME[] = {0x72, 0x05, 0x71, 0x11, 0x07};
-uint8_t RAW_RESPONSE_BUFFER[31];
-uint8_t CLEAN_RESPONSE_BUFFER[26];
-uint8_t PAYLOAD_BUFFER[21];
+uint8_t RAW_RESPONSE_BUFFER[30];
+uint8_t CLEAN_RESPONSE_BUFFER[25];
+uint8_t PAYLOAD_BUFFER[20];
 
 /*
 UART definition for hex transmission:
@@ -119,7 +119,6 @@ void clean_frame(uint8_t* raw, int raw_length, uint8_t* clean) {
     for(int i = offset; i < raw_length; i++) {
         clean[i - offset] = raw[i];
     }
-    printf("Clean_frame performed.\n");
 }
 //removes the 5 bytes of header from data frame, fills array with 21 byte payload
 void strip_header(uint8_t* unstripped, int unstripped_length, uint8_t* stripped) {
@@ -128,7 +127,6 @@ void strip_header(uint8_t* unstripped, int unstripped_length, uint8_t* stripped)
     for(int i = offset; i < unstripped_length - 1; i++) {
         stripped[i - offset] = unstripped[i];
     }
-    printf("Strip_header performed.\n");
 }
 
 //------------------------Frame Sending Methods------------------------//
@@ -143,6 +141,11 @@ bool ecu_wakeup(int retry) {
         //read echo and response into wakeup buffer
         len = uart_read_bytes(UART_NUM_2, (uint8_t*)WAKEUP_RESPONSE_BUFFER, sizeof(WAKEUP_RESPONSE_BUFFER), 100 / portTICK_PERIOD_MS);
         retry--;
+        
+        //prints every 10 retries
+        if(retry % 10 == 0) {
+            printf("Retry: %d", retry);
+        }
 
         //waits 1 second
         vTaskDelay(1000 / portTICK_PERIOD_MS);
@@ -168,7 +171,7 @@ bool ecu_wakeup(int retry) {
     printf("ECU Wakeup successful\n");
     return true;
 }
-//sends data polling hex, fills buffer array with all 26 bytes
+//sends data polling hex, fills buffer array with all 25 bytes
 bool poll() {
     //sends data request frame to ECU
     send_frame((uint8_t*)DIAG_FRAME, sizeof(DIAG_FRAME));
@@ -178,16 +181,18 @@ bool poll() {
     
     //checks received length
     if(len != sizeof(RAW_RESPONSE_BUFFER)) {
-        printf("Polling failed, length not the expected 31 bytes\n");
+        printf("Polling failed, length is: %d, not 30 Bytes\n", len);
+        for(int i = 0; i < len; i++) printf("%02X ", RAW_RESPONSE_BUFFER[i]);
+        printf("\n");
         return false;
     }
     else {
-        //takes the full 31 bytes into raw buffer, parses to 26 bytes, validates, parses to 21 bytes
+        //takes the full 30 bytes into raw buffer, parses to 25 bytes, validates, parses to 20 bytes
         clean_frame(RAW_RESPONSE_BUFFER, sizeof(RAW_RESPONSE_BUFFER), CLEAN_RESPONSE_BUFFER);
 
-        //verifies the checksum of the clean 26 byte frame. If it fails, return false
+        //verifies the checksum of the clean 25 byte frame. If it fails, return false
         if(!validate_frame(CLEAN_RESPONSE_BUFFER, sizeof(CLEAN_RESPONSE_BUFFER))) {
-            printf("Checksum validation for cleaned 26 byte frame failed.\n");
+            printf("Checksum validation for cleaned 25 byte frame failed.\n");
             return false;
         }
         //Strips remaining 5 header bytes and fills the payload into payload buffer
@@ -196,7 +201,6 @@ bool poll() {
         }
     }
     //if length check and checksum validation passes
-    printf("Data polled successfully, passed to 21 bytes.\n");
     return true;
 }
 
@@ -208,11 +212,12 @@ void app_main() {
         while(1) {
             //polls data, returns true if bytes are received. Bytes are now stored in PAYLOAD_BUFFER
             if(poll()) {
-                //prints all 21 bytes in a single line
+                //prints all 20 bytes in a single line
                 for(int i = 0; i < sizeof(PAYLOAD_BUFFER); i++) {
                     printf("%02X ", PAYLOAD_BUFFER[i]);
                 }
                 printf("\n");
+                vTaskDelay(500 / portTICK_PERIOD_MS);
            }
         }
     }
