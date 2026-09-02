@@ -2,10 +2,13 @@
 The core of this project is a serial to UART device that can initialize, request, and decode data received from the ECU of a 2007 CBR 600rr. The two iterations are split between discovery (Python and Pi), and on-board implementation (C and ESP).
 
 **Protocol**
+
 The code mimics the HDS in functionality (utilizing KWP2000 and ISO9141), using the same data table requested during diagnostic sessions through the in-house tool. So far the device can initiate, request, receive, and clean 20 (21 on Pi) bytes of data that can be stored and parsed. This includes RPM, speed, TPS voltage and percentage, ECT, Injection angle, Battery voltage, etc.
 
 **Hardware**
+
 The current functionality of this code wholly depends on the setup being used. The ESP32 toolchain currently involves a stepdown converter to tie voltage to 5v and provide power to the ESP board, a MikroBus transceiver that allows serial communication between ESP and ECU, and an ESP capable of UART communication, signals transferred via house-made cable that utilizes the sumimoto DLC connector. The Raspberry Pi toolchain currently involves an OBD2 to USB cable that mimics the MikroBus transceiver, and a DLC to OBD2 connector to communicate with the bike. Power comes from external batteries currently.
 
 **Status**
+
 The Python code packages and stores the received data into a .csv file, which can then be retrieved and parsed for information. Any form of linux will suffice for this, as it only hands the USB drivers and communication involved between board and bike. The C code is still in development, and where implementation will be from here on out. Current functionality is almost complete, requiring some bug fixing and robustness for writing, reconnection, transmission, and additional gathering of data.
