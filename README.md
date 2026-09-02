@@ -1,4 +1,3 @@
-[Untitled document.md](https://github.com/user-attachments/files/31760433/Untitled.document.md)
 **K-Line Data Parsing For Honda ECU**  
 The core of this project is a serial to UART device that can initialize, request, and decode data received from the ECU of a 2007 CBR 600rr. The two iterations are split between discovery (Python and Pi), and on-board implementation (C and ESP).
 
